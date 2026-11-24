@@ -3,15 +3,38 @@ from telebot import types
 import os
 from flask import Flask
 import threading
+import time
 
 # --- НАСТРОЙКИ ---
-# Токен будет браться из настроек Render (Environment Variables)
-9169576075:AAHE3LOrI3C1b0G3qrIRC-FhB8OZQu_wrQg = os.environ.get('BOT_TOKEN') 
+BOT_TOKEN = os.environ.get('BOT_TOKEN') 
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# Хранилище данных пользователей
 user_data = {}
 
-# --- КОМАНДА СТАРТ И КНОПКА ЗАПУСКА ---
+# --- ЗАЩИТА ОТ СПАМА (АНТИФЛУД) ---
+user_last_message_time = {}
+ANTI_FLOOD_DELAY = 1.0  # Задержка в секундах между сообщениями
+
+class AntiFloodMiddleware:
+    def __init__(self, bot):
+        self.bot = bot
+
+    def __call__(self, message):
+        user_id = message.from_user.id
+        current_time = time.time()
+        
+        if user_id in user_last_message_time:
+            last_time = user_last_message_time[user_id]
+            if current_time - last_time < ANTI_FLOOD_DELAY:
+                return None  # Игнорируем спам
+                
+        user_last_message_time[user_id] = current_time
+        return message
+
+bot.setup_middleware(AntiFloodMiddleware(bot))
+
+# --- КОМАНДА СТАРТ ---
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -27,7 +50,7 @@ def start(message):
 @bot.message_handler(func=lambda message: message.text == '🚀 Начать новый расчет')
 def start_calc(message):
     user_id = message.from_user.id
-    user_data[user_id] = {}
+    user_data[user_id] = {}  # Очищаем данные для нового расчета
     
     markup = types.ReplyKeyboardRemove()
     msg = bot.send_message(
@@ -38,6 +61,7 @@ def start_calc(message):
     )
     bot.register_next_step_handler(msg, process_customer_info)
 
+# --- СБОР ДАННЫХ ---
 def process_customer_info(message):
     user_id = message.from_user.id
     user_data[user_id]['customer_info'] = message.text
@@ -65,6 +89,7 @@ def process_total_cny(message):
         total_cny = float(message.text.replace(',', '.'))
         user_data[user_id]['total_cny'] = total_cny
         
+        # Выбор сценария
         markup = types.InlineKeyboardMarkup(row_width=1)
         btn_standard = types.InlineKeyboardButton("💱 Через тенге (Юань → Тенге → Рубль)", callback_data="scenario_kzt")
         btn_direct = types.InlineKeyboardButton("💱 Напрямую (Юань → Рубль)", callback_data="scenario_rub")
@@ -76,12 +101,13 @@ def process_total_cny(message):
         msg = bot.send_message(message.chat.id, "❌ Ошибка! Введи число (например: 625.7). Попробуй еще раз:")
         bot.register_next_step_handler(msg, process_total_cny)
 
+# --- ОБРАБОТКА ВЫБОРА СЦЕНАРИЯ ---
 @bot.callback_query_handler(func=lambda call: call.data in ['scenario_kzt', 'scenario_rub'])
 def callback_scenario(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
     
-    bot.delete_message(chat_id, call.message.message_id)
+    bot.delete_message(chat_id, call.message.message_id) # Удаляем сообщение с кнопками
     
     if call.data == 'scenario_kzt':
         user_data[user_id]['scenario'] = 'kzt'
@@ -97,6 +123,7 @@ def callback_scenario(call):
         msg = bot.send_message(chat_id, "💱 Введи **курс юаня к рублю** (например: *12.5*)\nИли нажми «Пропустить»:", reply_markup=markup, parse_mode='Markdown')
         bot.register_next_step_handler(msg, process_rate_cny_rub)
 
+# --- ВЕТКА 1: ЧЕРЕЗ ТЕНГЕ ---
 def process_rate_cny_kzt(message):
     user_id = message.from_user.id
     
@@ -131,6 +158,7 @@ def process_rate_kzt_rub(message):
     msg = bot.send_message(message.chat.id, "📈 Введи **процент наценки/запаса** (например: *10* для 10%):", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(msg, process_markup)
 
+# --- ВЕТКА 2: НАПРЯМУЮ В РУБЛЬ ---
 def process_rate_cny_rub(message):
     user_id = message.from_user.id
     
@@ -147,6 +175,7 @@ def process_rate_cny_rub(message):
     msg = bot.send_message(message.chat.id, "📈 Введи **процент наценки/запаса** (например: *10* для 10%):", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(msg, process_markup)
 
+# --- ФИНАЛЬНЫЙ РАСЧЕТ ---
 def process_markup(message):
     user_id = message.from_user.id
     try:
@@ -187,6 +216,7 @@ def process_markup(message):
             total_rub = total_cny_with_markup * rate_cny_rub
             calc_method = "напрямую"
         
+        # Формирование красивого ответа
         result_text = (
             f"✅ **РАСЧЕТ ГОТОВ ({calc_method})**\n\n"
             f"👤 **Заказчик:** {data['customer_info']}\n"
@@ -221,7 +251,7 @@ def process_markup(message):
         bot.register_next_step_handler(msg, process_markup)
 
 
-# --- МИНИ-ВЕБ-СЕРВЕР ДЛЯ RENDER (ЧТОБЫ БОТ НЕ ПАДАЛ) ---
+# --- МИНИ-ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -234,8 +264,6 @@ def run_flask():
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
-    # Запускаем Flask в фоне
     threading.Thread(target=run_flask).start()
     print("Бот запущен и работает...")
     bot.infinity_polling()
-
